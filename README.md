@@ -85,4 +85,4 @@ Projet réalisé dans le cadre du Master 1 Robotique Mobile à [Junia](https://w
 
 ## 📄 Licence
 
-Ce projet est sous licence MIT. Voir le fichier [LICENSE](LICENSE) pour plus de détails.
+Ce projet est sous licence GPL V3.
