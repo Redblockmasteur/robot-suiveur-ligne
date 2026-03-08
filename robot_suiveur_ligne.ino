@@ -34,6 +34,21 @@ const int ENC2_B = 21;   // INT2
 const int START_BUTTON_PIN = 2;  // À confirmer
 const int OBSTACLE_SENSOR_PIN = A0;  // Capteur IR obstacle
 
+// variables commande boucle fermee
+const float k_rho = 0.6f;     // Doit être > 0
+const float k_alpha = 1.5f;   // Doit être > 0
+const float k_beta = -0.6f;   // Doit être < 0
+
+// Position du robot (Odométrie)
+float x = 0.0f;
+float y = 0.0f;
+float theta = 0.0f;
+
+// Cible à atteindre (x_p, y_p, theta_p)
+float xp = 1.0f;
+float yp = 1.0f;
+float thetap = 0.0f;
+
 
 // Variables d'état
 bool started = false;
@@ -81,6 +96,12 @@ void ISR_ENC2_B() {
   else ticks_mot2--;
 }
 
+float wrap_to_pi(float angle) {
+  while (angle > PI) angle -= 2.0 * PI;
+  while (angle <= -PI) angle += 2.0 * PI;
+  return angle;
+}
+
 void setup() {
   // Initialisation des broches
   pinMode(LEFT_SENSOR_PIN, INPUT);
@@ -118,46 +139,53 @@ void loop() {
     return;  // Attendre le bouton start
   }
 
-  // Détection d'obstacle
-  obstacleDetected = (digitalRead(OBSTACLE_SENSOR_PIN) == LOW);
-
-  if (obstacleDetected) {
-    stopMotors();
-    Serial.println("Obstacle détecté - Arrêt");
-    delay(100);
-    return;
-  }
-
   // Lecture des capteurs de ligne
   int leftSensor = digitalRead(LEFT_SENSOR_PIN);
-  int rightSensor = digitalRead(RIGHT_SENSOR_PIN);
+  int rightSensor = digitalRead(RIGHT_SENSOR_PIN);  
+  
+  // Lecture des encodeurs de manière sécurisée
+  noInterrupts();
+  long delta_ticks1 = ticks_mot1; // Moteur Droit
+  long delta_ticks2 = ticks_mot2; // Moteur Gauche
+  ticks_mot1 = 0;
+  ticks_mot2 = 0;
+  interrupts();
+  
+  
+  // odometrie
+  float dist_droit = ((float)delta_ticks1 / TICKS_PAR_TOUR) * (PI * ROBOT_r);
+  float dist_gauche = ((float)delta_ticks2 / TICKS_PAR_TOUR) * (PI * ROBOT_r);
 
-  Serial.print("Capteurs: Gauche=");
-  Serial.print(leftSensor);
-  Serial.print(" Droit=");
-  Serial.println(rightSensor);
+  float d_center = (dist_droit + dist_gauche) / 2.0f;
+  float d_theta = (dist_droit - dist_gauche) / ROBOT_L;
 
-  // Logique de suivi de ligne
-  if (leftSensor == LOW && rightSensor == LOW) {
-    // Les deux capteurs sur la ligne noire - Arrêt
-    stopMotors();
-    Serial.println("Arrêt - Les deux capteurs sur la ligne");
-  } else if (leftSensor == LOW) {
-    // Capteur gauche sur la ligne - Tourner à gauche
-    turnLeft();
-    Serial.println("Tourner à gauche");
-  } else if (rightSensor == LOW) {
-    // Capteur droit sur la ligne - Tourner à droite
-    turnRight();
-    Serial.println("Tourner à droite");
-  } else {
-    // Les deux capteurs sur le blanc - Avancer tout droit
-    moveForward();
-    Serial.println("Avancer tout droit");
-  }
+  x += d_center * cos(theta + d_theta / 2.0f);
+  y += d_center * sin(theta + d_theta / 2.0f);
+  theta = wrap_to_pi(theta + d_theta);
 
-  float V_robot_voulu     = 0.5f;   // Vitesse linéaire désirée (m/s)
-  float Omega_robot_voulu = 0.0f;   // Vitesse angulaire désirée (rad/s)
+  // commande en boucle fermée (implementation du TP ROS2)
+  float dx = xp - x;
+  float dy = yp - y;
+  float rho = sqrt(dx * dx + dy * dy);
+  
+  float V_robot_voulu = 0.0f;
+  float Omega_robot_voulu = 0.0f;
+
+  const float rho_stop = 0.05f; // Rayon d'arrêt autour de la cible
+
+  if (rho > rho_stop) {
+    float angle_to_goal = atan2(dy, dx);
+    float alpha = wrap_to_pi(angle_to_goal - theta);
+    float beta = wrap_to_pi(thetap - theta - alpha);
+
+    V_robot_voulu = k_rho * rho;
+    Omega_robot_voulu = k_alpha * alpha + k_beta * beta;
+
+    // Saturation des vitesses de commande (Sécurité)
+    if (V_robot_voulu > 0.4f) V_robot_voulu = 0.4f;
+    if (V_robot_voulu < -0.4f) V_robot_voulu = -0.4f;
+  } 
+  
 
   // =========================================================================
   // PARTIE DU G4 : Cinématique inverse + Régulation PI
@@ -175,8 +203,8 @@ void loop() {
   // noInterrupts() garantit qu'aucune ISR ne modifie les compteurs
   // entre la lecture et la remise à zéro (évite la perte de ticks !).
   noInterrupts();
-  long delta_ticks1 = ticks_mot1;
-  long delta_ticks2 = ticks_mot2;
+  delta_ticks1 = ticks_mot1;
+  delta_ticks2 = ticks_mot2;
   ticks_mot1 = 0;
   ticks_mot2 = 0;
   interrupts();
@@ -194,27 +222,6 @@ void loop() {
   setMotorPower(RIGHT_MOTOR_PIN, DIR_MOT2, pwm_mot2);
 
   delay(50);  // Petit délai pour stabilité
-}
-
-// Fonctions de contrôle des moteurs
-void moveForward() {
-  analogWrite(LEFT_MOTOR_PIN, 200);  // PWM pour vitesse
-  analogWrite(RIGHT_MOTOR_PIN, 200);
-}
-
-void turnLeft() {
-  analogWrite(LEFT_MOTOR_PIN, 100);  // Ralentir le moteur gauche
-  analogWrite(RIGHT_MOTOR_PIN, 200);
-}
-
-void turnRight() {
-  analogWrite(LEFT_MOTOR_PIN, 200);
-  analogWrite(RIGHT_MOTOR_PIN, 100);  // Ralentir le moteur droit
-}
-
-void stopMotors() {
-  digitalWrite(LEFT_MOTOR_PIN, LOW);
-  digitalWrite(RIGHT_MOTOR_PIN, LOW);
 }
 
 // =========================================================================
